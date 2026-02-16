@@ -31,6 +31,7 @@ import {
   PYTHON_TOOL_ID,
   SEARCH_TOOL_ID,
   OPEN_URL_TOOL_ID,
+  FILE_READER_TOOL_ID,
 } from "@/app/app/components/tools/constants";
 import Text from "@/refresh-components/texts/Text";
 import { Card } from "@/refresh-components/cards";
@@ -38,9 +39,9 @@ import SimpleCollapsible from "@/refresh-components/SimpleCollapsible";
 import SwitchField from "@/refresh-components/form/SwitchField";
 import SimpleTooltip from "@/refresh-components/SimpleTooltip";
 import { useDocumentSets } from "@/app/admin/documents/sets/hooks";
-import { useProjectsContext } from "@/app/app/projects/ProjectsContext";
+import { useProjectsContext } from "@/providers/ProjectsContext";
 import { useCreateModal } from "@/refresh-components/contexts/ModalContext";
-import { usePopup } from "@/components/admin/connectors/Popup";
+import { toast } from "@/hooks/useToast";
 import UserFilesModal from "@/components/modals/UserFilesModal";
 import {
   ProjectFile,
@@ -85,6 +86,7 @@ import ConfirmationModalLayout from "@/refresh-components/layouts/ConfirmationMo
 import ShareAgentModal from "@/sections/modals/ShareAgentModal";
 import AgentKnowledgePane from "@/sections/knowledge/AgentKnowledgePane";
 import { ValidSources } from "@/lib/types";
+import { useSettingsContext } from "@/providers/SettingsProvider";
 
 interface AgentIconEditorProps {
   existingAgent?: FullPersona | null;
@@ -445,10 +447,11 @@ export default function AgentEditorPage({
 }: AgentEditorPageProps) {
   const router = useRouter();
   const appRouter = useAppRouter();
-  const { popup, setPopup } = usePopup();
   const { refresh: refreshAgents } = useAgents();
   const shareAgentModal = useCreateModal();
   const deleteAgentModal = useCreateModal();
+  const settings = useSettingsContext();
+  const vectorDbEnabled = settings?.settings.vector_db_enabled !== false;
 
   // LLM Model Selection
   const getCurrentLlm = useCallback(
@@ -522,6 +525,9 @@ export default function AgentEditorPage({
   const codeInterpreterTool = availableTools?.find(
     (t) => t.in_code_tool_id === PYTHON_TOOL_ID
   );
+  const fileReaderTool = availableTools?.find(
+    (t) => t.in_code_tool_id === FILE_READER_TOOL_ID
+  );
   const isImageGenerationAvailable = !!imageGenTool;
   const imageGenerationDisabledTooltip = isImageGenerationAvailable
     ? undefined
@@ -561,10 +567,6 @@ export default function AgentEditorPage({
     // Knowledge - enabled if num_chunks is greater than 0
     // (num_chunks of 0 or null means knowledge is disabled)
     enable_knowledge: (existingAgent?.num_chunks ?? 0) > 0,
-    knowledge_source:
-      existingAgent?.user_file_ids && existingAgent.user_file_ids.length > 0
-        ? "user_knowledge"
-        : ("team_knowledge" as "team_knowledge" | "user_knowledge"),
     document_set_ids: existingAgent?.document_sets?.map((ds) => ds.id) ?? [],
     // Individual document IDs from hierarchy browsing
     document_ids: existingAgent?.attached_documents?.map((doc) => doc.id) ?? [],
@@ -613,6 +615,13 @@ export default function AgentEditorPage({
         (tool) => tool.in_code_tool_id === PYTHON_TOOL_ID
       ) ??
         false),
+    file_reader:
+      !!fileReaderTool &&
+      (existingAgent?.tools?.some(
+        (tool) => tool.in_code_tool_id === FILE_READER_TOOL_ID
+      ) ??
+        // Default to enabled for new assistants when the tool is available
+        !!fileReaderTool),
 
     // MCP servers - dynamically add fields for each server with nested tool fields
     ...Object.fromEntries(
@@ -680,7 +689,6 @@ export default function AgentEditorPage({
 
     // Knowledge
     enable_knowledge: Yup.boolean(),
-    knowledge_source: Yup.string().oneOf(["team_knowledge", "user_knowledge"]),
     document_set_ids: Yup.array().of(Yup.number()),
     document_ids: Yup.array().of(Yup.string()),
     hierarchy_node_ids: Yup.array().of(Yup.number()),
@@ -739,14 +747,18 @@ export default function AgentEditorPage({
         starterMessages.length > 0 ? starterMessages : null;
 
       // Determine knowledge settings
-      const teamKnowledge = values.knowledge_source === "team_knowledge";
       const numChunks = values.enable_knowledge ? MAX_CHUNKS_FED_TO_CHAT : 0;
 
       // Always look up tools in availableTools to ensure we can find all tools
 
       const toolIds = [];
-      if (values.enable_knowledge && searchTool) {
-        toolIds.push(searchTool.id);
+      if (values.enable_knowledge) {
+        if (vectorDbEnabled && searchTool) {
+          toolIds.push(searchTool.id);
+        }
+      }
+      if (values.file_reader && fileReaderTool) {
+        toolIds.push(fileReaderTool.id);
       }
       if (values.image_generation && imageGenTool) {
         toolIds.push(imageGenTool.id);
@@ -796,10 +808,9 @@ export default function AgentEditorPage({
       const submissionData: PersonaUpsertParameters = {
         name: values.name,
         description: values.description,
-        document_set_ids:
-          values.enable_knowledge && teamKnowledge
-            ? values.document_set_ids
-            : [],
+        document_set_ids: values.enable_knowledge
+          ? values.document_set_ids
+          : [],
         num_chunks: numChunks,
         is_public: values.is_public,
         // recency_bias: ...,
@@ -820,14 +831,11 @@ export default function AgentEditorPage({
         is_default_persona: false,
         // display_priority: ...,
 
-        user_file_ids:
-          values.enable_knowledge && !teamKnowledge ? values.user_file_ids : [],
-        hierarchy_node_ids:
-          values.enable_knowledge && teamKnowledge
-            ? values.hierarchy_node_ids
-            : [],
-        document_ids:
-          values.enable_knowledge && teamKnowledge ? values.document_ids : [],
+        user_file_ids: values.enable_knowledge ? values.user_file_ids : [],
+        hierarchy_node_ids: values.enable_knowledge
+          ? values.hierarchy_node_ids
+          : [],
+        document_ids: values.enable_knowledge ? values.document_ids : [],
 
         system_prompt: values.instructions,
         replace_base_system_prompt: values.replace_base_system_prompt,
@@ -848,23 +856,19 @@ export default function AgentEditorPage({
         const error = personaResponse
           ? await personaResponse.text()
           : "No response received";
-        setPopup({
-          type: "error",
-          message: `Failed to ${
-            existingAgent ? "update" : "create"
-          } agent - ${error}`,
-        });
+        toast.error(
+          `Failed to ${existingAgent ? "update" : "create"} agent - ${error}`
+        );
         return;
       }
 
       // Success
       const agent = await personaResponse.json();
-      setPopup({
-        type: "success",
-        message: `Agent "${agent.name}" ${
+      toast.success(
+        `Agent "${agent.name}" ${
           existingAgent ? "updated" : "created"
-        } successfully`,
-      });
+        } successfully`
+      );
 
       // Refresh agents list and the specific agent
       await refreshAgents();
@@ -876,10 +880,7 @@ export default function AgentEditorPage({
       appRouter({ agentId: agent.id });
     } catch (error) {
       console.error("Submit error:", error);
-      setPopup({
-        type: "error",
-        message: `An error occurred: ${error}`,
-      });
+      toast.error(`An error occurred: ${error}`);
     }
   }
 
@@ -890,15 +891,9 @@ export default function AgentEditorPage({
     const error = await deleteAgent(existingAgent.id);
 
     if (error) {
-      setPopup({
-        type: "error",
-        message: `Failed to delete agent: ${error}`,
-      });
+      toast.error(`Failed to delete agent: ${error}`);
     } else {
-      setPopup({
-        type: "success",
-        message: "Agent deleted successfully",
-      });
+      toast.success("Agent deleted successfully");
 
       deleteAgentModal.toggle(false);
       await refreshAgents();
@@ -947,7 +942,6 @@ export default function AgentEditorPage({
       const optimistic = await beginUpload(
         Array.from(files),
         null,
-        setPopup,
         (result) => {
           const uploadedFiles = result.user_files || [];
           if (uploadedFiles.length === 0) return;
@@ -983,8 +977,6 @@ export default function AgentEditorPage({
 
   return (
     <>
-      {popup}
-
       <div
         data-testid="AgentsEditorPage/container"
         aria-label="Agents Editor Page"
@@ -1007,9 +999,10 @@ export default function AgentEditorPage({
             const hasUploadingFiles = values.user_file_ids.some(
               (fileId: string) => {
                 const status = fileStatusMap.get(fileId);
-                return (
-                  status === undefined || status === UserFileStatus.UPLOADING
-                );
+                if (status === undefined) {
+                  return fileId.startsWith("temp_");
+                }
+                return status === UserFileStatus.UPLOADING;
               }
             );
 
@@ -1242,6 +1235,8 @@ export default function AgentEditorPage({
                         initialAttachedDocuments={
                           existingAgent?.attached_documents
                         }
+                        initialHierarchyNodes={existingAgent?.hierarchy_nodes}
+                        vectorDbEnabled={vectorDbEnabled}
                       />
 
                       <Separator noPadding />
@@ -1324,6 +1319,24 @@ export default function AgentEditorPage({
                                 <SwitchField
                                   name="code_interpreter"
                                   disabled={!codeInterpreterTool}
+                                />
+                              </InputLayouts.Horizontal>
+                            </Card>
+
+                            <Card
+                              variant={
+                                !!fileReaderTool ? undefined : "disabled"
+                              }
+                            >
+                              <InputLayouts.Horizontal
+                                name="file_reader"
+                                title="File Reader"
+                                description="Read sections of uploaded files. Required for files that exceed the context window."
+                                disabled={!fileReaderTool}
+                              >
+                                <SwitchField
+                                  name="file_reader"
+                                  disabled={!fileReaderTool}
                                 />
                               </InputLayouts.Horizontal>
                             </Card>

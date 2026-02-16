@@ -6,7 +6,7 @@ import { Notification } from "@/app/admin/settings/interfaces";
 import useSWR, { preload } from "swr";
 import { errorHandlingFetcher } from "@/lib/fetcher";
 import { checkUserIsNoAuthUser, logout } from "@/lib/user";
-import { useUser } from "@/components/user/UserProvider";
+import { useUser } from "@/providers/UserProvider";
 import InputAvatar from "@/refresh-components/inputs/InputAvatar";
 import Text from "@/refresh-components/texts/Text";
 import LineItem from "@/refresh-components/buttons/LineItem";
@@ -23,7 +23,7 @@ import {
   SvgNotificationBubble,
 } from "@opal/icons";
 import { Section } from "@/layouts/general-layouts";
-import { usePopup } from "@/components/admin/connectors/Popup";
+import { toast } from "@/hooks/useToast";
 import useAppFocus from "@/hooks/useAppFocus";
 
 function getDisplayName(email?: string, personalName?: string): string {
@@ -58,8 +58,6 @@ function SettingsPopover({
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const { popup, setPopup } = usePopup();
-
   const undismissedCount =
     notifications?.filter((n) => !n.dismissed).length ?? 0;
   const isAnonymousUser =
@@ -95,14 +93,12 @@ function SettingsPopover({
       })
 
       .catch(() => {
-        setPopup({ message: "Failed to logout", type: "error" });
+        toast.error("Failed to logout");
       });
   };
 
   return (
     <>
-      {popup}
-
       <PopoverMenu>
         {[
           <div key="user-settings" data-testid="Settings/user-settings">
